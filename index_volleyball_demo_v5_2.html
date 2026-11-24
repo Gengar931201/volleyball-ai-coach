@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<link rel="icon" href="data:,">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI 排球低手接球教練｜動態分析 v4</title>
+<style>
+*{box-sizing:border-box}body{margin:0;padding:20px;background:#101827;color:#fff;font-family:Arial,"Noto Sans TC",sans-serif}main{max-width:820px;margin:auto}h1{font-size:24px;margin-bottom:5px}p{color:#b8c5d6}.video-box{position:relative;width:100%;background:#26364b;border-radius:14px;overflow:hidden}video{display:block;width:100%;transform:scaleX(-1)}canvas{position:absolute;inset:0;width:100%;height:100%;transform:scaleX(-1);pointer-events:none}.demo-zone{position:absolute;left:25%;width:50%;top:0;height:100%;border-left:2px dashed #22c55e;border-right:2px dashed #22c55e;pointer-events:none}.zone-label{position:absolute;top:8px;left:50%;transform:translateX(-50%);padding:4px 9px;border-radius:7px;background:#102719d9;color:#b6f7cb;font-size:12px;pointer-events:none}button{padding:12px 15px;border:0;border-radius:9px;margin:5px 3px 8px 0;font-size:14px;cursor:pointer}button:disabled{opacity:.45;cursor:not-allowed}.start{background:#22c55e;color:#082312}.stop{background:#ef4444;color:#fff}.secondary{background:#dbeafe;color:#14243c}.panel{background:#243349;border-radius:12px;padding:15px;margin-top:12px}.metrics{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.metric{background:#33445b;padding:12px;border-radius:9px}.metric p{margin:0 0 6px}.value{font-size:24px;font-weight:bold}#feedback{color:#86efac;font-size:19px;line-height:1.5}#phase{font-weight:bold;color:#a5d8ff}#history{padding-left:20px;line-height:1.7;color:#d5e3f3}#history li{margin:5px 0}.hint{font-size:13px;color:#cbd5e1}.buttons{display:flex;flex-wrap:wrap;gap:2px}#status{min-height:1.4em}@media(max-width:480px){body{padding:10px}.value{font-size:20px}.demo-zone{left:25%;width:50%}}
+</style>
+</head>
+<body>
+<main>
+<h1>🏐 AI Volleyball Coach</h1>
+<p>低手接球動態動作分析｜教學演示模式 v5（手動評量）（無球模擬）</p>
+<div class="buttons">
+<button class="start" id="start">開啟攝影機與分析</button>
+<button class="stop" id="stop">停止分析</button>
+<button class="secondary" id="manualStart" disabled>手動開始一次動作</button>
+<button class="secondary" id="manualEnd" disabled>手動結束並評量</button>
+<button id="testVoice">測試語音</button>
+</div>
+<p id="status">系統尚未啟動</p>
+<div class="video-box">
+<video id="video" autoplay playsinline muted></video>
+<canvas id="canvas"></canvas>
+<div class="demo-zone"></div>
+<div class="zone-label">中央動作者分析區</div>
+</div>
+<div class="panel">
+<h3>動作數據</h3>
+<div class="metrics">
+<div class="metric"><p>膝關節角度</p><div class="value" id="knee">--</div></div>
+<div class="metric"><p>手肘角度</p><div class="value" id="elbow">--</div></div>
+<div class="metric"><p>雙手距離比</p><div class="value" id="hands">--</div></div>
+<div class="metric"><p>辨識狀態</p><div class="value" id="poseStatus">等待</div></div>
+</div>
+<p>動作階段：<span id="phase">等待手動開始</span>　｜　有效模擬次數：<strong id="count">0</strong>　｜　有效影格：<strong id="frames">0</strong></p>
+<p class="hint">請讓肩膀、雙手、髖部、膝蓋與腳踝入鏡。鏡頭固定、評審席避開鏡頭。綠線為髖部中心的允許區域。</p>
+</div>
+<div class="panel"><h3>🔊 AI 小助教單次回饋</h3><div id="feedback" aria-live="polite">等待動作者進入畫面中央區域</div></div>
+<div class="panel"><h3>最近的手動動作紀錄（舊 → 新，含未計次嘗試）</h3><ol id="history"></ol><p class="hint">僅按下手動開始與結束後才進行動作評量；系統無法確認真實觸球。當資料不足或站姿不穩時不判定為正確；結果僅供教學討論。</p></div>
+</main>
+<script type="module">
+import {FilesetResolver,PoseLandmarker} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/vision_bundle.mjs";
+const $=id=>document.getElementById(id);
+const video=$("video"),canvas=$("canvas"),ctx=canvas.getContext("2d");
+const feedbackText=$("feedback"),statusText=$("status");
+const WAIT_TEXT="等待動作者進入畫面中央區域";
+// 皆為原型測試門檻，非正式運動技術標準
+const C={zoneLeft:.25,zoneRight:.75,minVisibility:.55,personMaxShift:.17,poseLostMs:650,
+ startDistance:.16,startConfirmMs:180,stillVelocity:.24,finishHoldMs:380,
+ minActionMs:450,maxActionMs:4000,resetHoldMs:380,feedbackHoldMs:650,
+ lostGraceMs:420,resetStillVelocity:.32,
+ elbowThreshold:160,handThreshold:.52,kneeTooStraight:175,kneeVeryBent:70,
+ asymmetryKnee:42,elbowDisagreement:35};
+let landmarker=null,stream=null,running=false,starting=false,lastVideoTime=-1,rafId=null;
+let state="READY",stateAt=0,moveAt=0,stillAt=0,resetAt=0,manual=false;
+let baseline=null,actionStart=null,peakMovement=0,samples=[],latest=null,previousWrist=null,trackedCenter=null,lastSeenAt=0;
+let completed=0,attempts=0,voiceToken=0,voiceActive=false,historyEntries=[];
+let lastGoodFeatureAt=0,qualityLostAt=0,resetAnchor=null,voicePending=null,voiceStartedAt=0;
+let cameraStartedAt=0,everReady=false,missingSince=0,lastPositionVoiceAt=-Infinity,lastManualEndAt=-Infinity,lastPositionKind="",lastVoiceKind="";
+const POSITION_INITIAL_GRACE_MS=8000,POSITION_HOLD_MS=3200,POSITION_COOLDOWN_MS=18000,POST_FEEDBACK_SILENCE_MS=5500;
+const feedbackVariants={
+ good:["這次接球準備姿勢不錯，雙臂與下肢都維持得很穩定，繼續保持！","做得很好！這次雙手、手肘與膝蓋都符合目前的觀察條件。","這次的前臂平台和預備姿勢都很穩定，可以繼續練習接球方向的控制。"],
+ elbow:["這次手肘彎曲較明顯，下一次試著把雙臂向前延伸。","接球時可以再穩定手肘，讓前臂形成平整的接球平台。","注意接球平台！下次減少手肘彎曲，讓兩側前臂更穩定。","這次先調整手肘，雙臂向前伸展，會更容易控制接球方向。"],
+ hands:["雙手稍微分開了，下次試著把雙手固定在一起。","接球前先把雙手靠攏，讓兩側前臂形成一致的平台。","這次可以先改善雙手距離，維持穩定的接球手型。","記得固定雙手位置，減少接球時前臂平台的晃動。"],
+ knee:["這次準備時膝蓋較直，下一次可以稍微屈膝，保持彈性。","試著放鬆膝蓋、略微降低重心，準備迎接來球。","下次接球前先調整站姿，膝蓋保持自然彎曲，方便移動。"],
+ deepKnee:["這次蹲得有點深，維持自然屈膝就好，不需要刻意深蹲。","接球準備時不必蹲得太低，保持能夠快速移動的姿勢即可。"],
+ balance:["這次雙腳支撐不夠穩定，先站穩再準備接球。","可以先調整兩腳的站位，維持穩定支撐，再完成接球。"],
+ uncertain:["這次關節辨識不夠完整，請調整站位或攝影角度後再試一次。","這次畫面資料不足，AI 無法可靠評量，請重新示範。"]
+};
+const feedbackRotation={};
+function variedFeedback(result){const key=result.type==="knee"&&result.message.includes("蹲得")?"deepKnee":result.type;const options=feedbackVariants[key];if(!options)return result;const i=feedbackRotation[key]||0;feedbackRotation[key]=i+1;return {...result,message:options[i%options.length]};}
+function maybePositionPrompt(now,kind){
+ if(!running||state==="MOVING"||state==="FEEDBACK"||now-lastManualEndAt<POST_FEEDBACK_SILENCE_MS)return;
+ if(now-cameraStartedAt<POSITION_INITIAL_GRACE_MS)return;
+ if(!everReady)return; // 尚未首次成功入鏡時，先只顯示文字，避免上台時被語音催促
+ if(kind!==lastPositionKind){lastPositionKind=kind;missingSince=now;return;}
+ if(now-missingSince<POSITION_HOLD_MS||now-lastPositionVoiceAt<POSITION_COOLDOWN_MS)return;
+ if(voiceActive||voicePending||speechSynthesis.speaking)return;
+ lastPositionVoiceAt=now;
+ say(kind==="outside"?"請移動到畫面中央的綠色辨識區，並保持全身入鏡。":"目前部分關節辨識不清楚，請稍微調整站位，讓身體完整入鏡。");
+}
+function positionRecovered(){lastPositionKind="";missingSince=0;}
+const labels={READY:"等待手動開始",MOVING:"手動記錄動作中",FEEDBACK:"已完成動作評量",RESET:"等待手動開始"};
+function angle(a,b,c){const x=a.x-b.x,y=a.y-b.y,u=c.x-b.x,v=c.y-b.y,m=Math.hypot(x,y)*Math.hypot(u,v);if(m<1e-6)return null;return Math.acos(Math.max(-1,Math.min(1,(x*u+y*v)/m)))*180/Math.PI;}
+function dist(a,b){return Math.hypot(a.x-b.x,a.y-b.y);}
+function confident(p,ids,limit=C.minVisibility){return ids.every(i=>p[i]&&(p[i].visibility??1)>=limit);}
+function median(arr){if(!arr.length)return null;const a=[...arr].sort((x,y)=>x-y),i=Math.floor(a.length/2);return a.length%2?a[i]:(a[i-1]+a[i])/2;}
+// 每次評量最多排入一則回饋；不在影格迴圈中反覆取消語音。
+function say(message){
+ if(!message||!("speechSynthesis" in window))return;
+ voicePending=message;
+ playPendingVoice();
+}
+function playPendingVoice(){
+ if(!voicePending||voiceActive||speechSynthesis.speaking||speechSynthesis.pending)return;
+ const message=voicePending;voicePending=null;
+ const u=new SpeechSynthesisUtterance(message);
+ u.lang="zh-TW";u.rate=1.12;
+ voiceActive=true;voiceStartedAt=performance.now();
+ u.onend=u.onerror=()=>{voiceActive=false;playPendingVoice();};
+ speechSynthesis.speak(u);
+}
+function clearVoice(){
+ voicePending=null;voiceActive=false;
+ if("speechSynthesis" in window)speechSynthesis.cancel();
+}
+function setState(s,now){state=s;stateAt=now;$("phase").textContent=labels[s]||s;$("manualStart").disabled=!running||s==="MOVING";$("manualEnd").disabled=!running||s!=="MOVING";}
+function resetTracking(){baseline=null;actionStart=null;peakMovement=0;samples=[];latest=null;previousWrist=null;trackedCenter=null;lastSeenAt=0;moveAt=0;stillAt=0;resetAt=0;resetAnchor=null;qualityLostAt=0;lastGoodFeatureAt=0;manual=false;$("frames").textContent="0";setState("READY",performance.now());}
+function clearMetrics(){["knee","elbow","hands"].forEach(id=>$(id).textContent="--");}
+function clearPose(message=WAIT_TEXT){ctx.clearRect(0,0,canvas.width,canvas.height);$("poseStatus").textContent="等待";clearMetrics();if(state!=="FEEDBACK")feedbackText.textContent=message;}
+function inZone(p){if(!confident(p,[11,12,23,24]))return false;const x=(p[23].x+p[24].x)/2;return x>=C.zoneLeft&&x<=C.zoneRight;}
+function choosePose(poses){const candidates=poses.filter(inZone).map(p=>({p,x:(p[23].x+p[24].x)/2,y:(p[23].y+p[24].y)/2}));if(!candidates.length)return null;if(trackedCenter){const ranked=candidates.map(c=>({...c,d:Math.hypot(c.x-trackedCenter.x,c.y-trackedCenter.y)})).sort((a,b)=>a.d-b.d);if(ranked[0].d>C.personMaxShift)return null;return ranked[0].p;}candidates.sort((a,b)=>Math.abs(a.x-.5)-Math.abs(b.x-.5));return candidates[0].p;}
+function drawPose(p){canvas.width=video.videoWidth;canvas.height=video.videoHeight;ctx.clearRect(0,0,canvas.width,canvas.height);const links=[[11,12],[11,13],[13,15],[12,14],[14,16],[11,23],[12,24],[23,24],[23,25],[25,27],[24,26],[26,28]];ctx.strokeStyle="#22e6a0";ctx.lineWidth=4;for(const [a,b] of links){if(!confident(p,[a,b],.5))continue;ctx.beginPath();ctx.moveTo(p[a].x*canvas.width,p[a].y*canvas.height);ctx.lineTo(p[b].x*canvas.width,p[b].y*canvas.height);ctx.stroke();}ctx.fillStyle="#ffdc5e";for(const pt of p){if((pt.visibility??1)<.5)continue;ctx.beginPath();ctx.arc(pt.x*canvas.width,pt.y*canvas.height,4,0,Math.PI*2);ctx.fill();}}
+function features(p,now){const ids=[11,12,13,14,15,16,23,24,25,26,27,28];
+ // 肩、髖與雙手必須可靠；膝踝可在短暫遮擋時沿用上一筆可信資料（不拿來評量）。
+ if(!confident(p,[11,12,15,16,23,24],.48))return null;
+ if(!confident(p,[13,14],.48))return null;
+ const legsReliable=confident(p,[25,26,27,28],.50);
+ if(!legsReliable && !latest)return null;const le=angle(p[11],p[13],p[15]),re=angle(p[12],p[14],p[16]);
+ const lk=legsReliable?angle(p[23],p[25],p[27]):latest.lk;
+ const rk=legsReliable?angle(p[24],p[26],p[28]):latest.rk;
+ if([le,re,lk,rk].some(x=>x===null||!Number.isFinite(x)))return null;const shoulder=Math.max(.01,dist(p[11],p[12]));const wrist={x:(p[15].x+p[16].x)/2,y:(p[15].y+p[16].y)/2};const hip={x:(p[23].x+p[24].x)/2,y:(p[23].y+p[24].y)/2};const ankleYDiff=legsReliable?Math.abs(p[27].y-p[28].y):0;
+ const legLength=legsReliable?(dist(p[23],p[25])+dist(p[25],p[27])+dist(p[24],p[26])+dist(p[26],p[28]))/2:1;return {now,le,re,lk,rk,elbow:(le+re)/2,knee:(lk+rk)/2,hands:dist(p[15],p[16])/shoulder,wristRel:{x:(wrist.x-hip.x)/shoulder,y:(wrist.y-hip.y)/shoulder},ankleDiff:legsReliable?ankleYDiff/Math.max(.05,legLength):null,legsReliable,hip};}
+function showMetrics(f){$("knee").textContent=Math.round(f.knee)+"°";$("elbow").textContent=Math.round(f.elbow)+"°";$("hands").textContent=f.hands.toFixed(2);$("poseStatus").textContent="已鎖定區域";}
+function addSample(f){samples.push(f);if(samples.length>220)samples.shift();$("frames").textContent=String(samples.length);}
+function evaluate(){const all=samples.filter(Boolean);if(all.length<4)return {type:"uncertain",message:"這次有效動作資料不足，請重新示範。",details:"有效影格不足"};const n=all.length;
+ // 以動作中後段的有效影格評量前臂平台；以開始階段評量預備屈膝
+ const mid=all.slice(Math.floor(n*.30),Math.max(Math.floor(n*.30)+1,Math.ceil(n*.85)));
+ const prep=all.slice(0,Math.max(2,Math.ceil(n*.35)));
+ const stableElbows=mid.filter(f=>Math.abs(f.le-f.re)<=C.elbowDisagreement);
+ const elbow=stableElbows.length>=Math.max(2,Math.ceil(mid.length*.45))?median(stableElbows.map(f=>Math.min(f.le,f.re))):null;
+ const hands=median(mid.map(f=>f.hands));const knee=median(prep.map(f=>f.knee));
+ const asymmetry=median(prep.map(f=>Math.abs(f.lk-f.rk)));
+ const ankleDiff=median(prep.filter(f=>f.legsReliable).map(f=>f.ankleDiff));
+ const legFrames=prep.filter(f=>f.legsReliable).length;
+ const details=`手肘 ${elbow===null?"不確定":Math.round(elbow)+"°"}；膝蓋 ${Math.round(knee)}°；雙手比 ${hands.toFixed(2)}`;
+ let type="good",message="這次模擬接球的基本動作符合目前設定的觀察條件，繼續保持！";
+ if(legFrames<Math.max(2,Math.ceil(prep.length*.5))){type="uncertain";message="這次下肢關節遮擋較多，無法可靠評量，請調整鏡頭或衣著再試一次。";}
+ else if(ankleDiff!==null&&(ankleDiff>.30||asymmetry>C.asymmetryKnee)){type="balance";message="這次雙腳支撐或左右膝關節差異較大，請先站穩，再進行接球示範。";}
+ else if(elbow===null){type="uncertain";message="這次左右手肘辨識差異較大，無法可靠評量，請調整拍攝角度再試一次。";}
+ else if(elbow<C.elbowThreshold){type="elbow";message="這次迎球時手肘彎曲較多，下次試著保持雙臂向前延伸。";}
+ else if(hands>C.handThreshold){type="hands";message="這次雙手距離較大，下次試著固定雙手，形成穩定的前臂平台。";}
+ else if(knee>C.kneeTooStraight){type="knee";message="這次準備時膝蓋較直，下次試著微屈膝蓋，保持能快速移動的姿勢。";}
+ else if(knee<C.kneeVeryBent){type="knee";message="這次蹲得比較深，不需要刻意深蹲，保持舒適且能移動的重心即可。";}
+ return {type,message,details};}
+function recordResult(result,valid){
+  attempts++;if(valid) completed++;
+  $("count").textContent=String(completed);
+  const label=valid?`第 ${completed} 次`:`第 ${attempts} 次嘗試（未計次）`;
+  historyEntries.push(`${label}｜${result.message}（${result.details}；有效影格 ${samples.length}）`);
+  historyEntries=historyEntries.slice(-5);
+  const list=$("history");list.replaceChildren();
+  for(const entry of historyEntries){const li=document.createElement("li");li.textContent=entry;list.appendChild(li);}
+}
+function finish(now){
+  if(state!=="MOVING")return;
+  const duration=now-stateAt;
+  const sufficient=samples.length>=6&&duration>=C.minActionMs&&(manual||peakMovement>=.20);
+  const rawResult=sufficient?evaluate():{type:"uncertain",message:"這次動作資料不足，請確認全身入鏡後再試一次。",details:"動作時間或有效影格不足"};
+  const result=variedFeedback(rawResult);
+  const valid=sufficient&&result.type!=="uncertain";
+  recordResult(result,valid);
+  manual=false;lastManualEndAt=now;positionRecovered();
+  feedbackText.textContent=result.message;
+  setState("FEEDBACK",now);
+  say(result.message);
+}
+function updateAction(f,now){
+  latest=f;showMetrics(f);
+  if(state==="MOVING"){
+    // 只有按下手動開始才會進入 MOVING；不再自動開始或結束
+    addSample(f);
+    return;
+  }
+  // 手動結束後立即回到待命，沒有自動 RESET 計時器
+  if(state==="FEEDBACK"&&now-stateAt>C.feedbackHoldMs){setState("READY",now);}
+}
+function abortAction(){samples=[];manual=false;baseline=null;actionStart=null;peakMovement=0;setState("READY",performance.now());feedbackText.textContent="動作資料中斷，請重新示範";}
+async function start(){if(running||starting)return;starting=true;$("start").disabled=true;try{statusText.textContent="正在載入人體辨識模型...";if(!landmarker){const vision=await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm");landmarker=await PoseLandmarker.createFromOptions(vision,{baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task"},runningMode:"VIDEO",numPoses:2});}statusText.textContent="正在開啟攝影機...";stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"},width:{ideal:1280},height:{ideal:720}},audio:false});video.srcObject=stream;await video.play();running=true;lastVideoTime=-1;resetTracking();$("manualStart").disabled=false;clearVoice();cameraStartedAt=performance.now();everReady=false;positionRecovered();lastPositionVoiceAt=-Infinity;lastManualEndAt=-Infinity;statusText.textContent="分析運作中（手動動作評量＋自動站位提醒 v5.2）";feedbackText.textContent=WAIT_TEXT;rafId=requestAnimationFrame(loop);say("您好，歡迎使用AI排球低手小助教。請站在畫面中央的綠色辨識區，讓全身完整入鏡。準備好後，請按手動開始，完成一次低手接球動作，再按手動結束並評量。動作時請注意雙手靠攏、手肘自然伸直，膝蓋微彎、保持穩定。現在可以開始練習了。");}catch(error){statusText.textContent="啟動失敗："+error.message;console.error(error);if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;}video.srcObject=null;}finally{starting=false;$("start").disabled=running;}}
+function loop(){
+ if(!running)return;
+ try{
+  if(video.readyState>=2&&video.currentTime!==lastVideoTime){
+   lastVideoTime=video.currentTime;
+   const now=performance.now(),result=landmarker.detectForVideo(video,now),p=choosePose(result.landmarks||[]);
+   if(p){
+    trackedCenter={x:(p[23].x+p[24].x)/2,y:(p[23].y+p[24].y)/2};lastSeenAt=now;
+    drawPose(p);
+    const f=features(p,now);
+    if(f){
+     qualityLostAt=0;lastGoodFeatureAt=now;everReady=true;positionRecovered();
+     updateAction(f,now);previousWrist={value:f.wristRel,now};
+    }else{
+     clearMetrics();$("poseStatus").textContent="關節暫時不完整";
+     if(!qualityLostAt)qualityLostAt=now;
+     if(state!=="MOVING"&&state!=="FEEDBACK")feedbackText.textContent="部分關節辨識不清，請調整站位";
+     maybePositionPrompt(now,"incomplete");
+    }
+   }else{
+    clearPose();
+    if(now-lastSeenAt>C.poseLostMs){trackedCenter=null;previousWrist=null;}
+    if(state!=="MOVING"&&state!=="FEEDBACK")feedbackText.textContent=WAIT_TEXT;
+    maybePositionPrompt(now,"outside");
+   }
+  }
+ }catch(e){console.error(e);statusText.textContent="分析錯誤："+e.message;stop();return;}
+ rafId=requestAnimationFrame(loop);
+}
+function stop(){running=false;if(rafId!==null){cancelAnimationFrame(rafId);rafId=null;}if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;}video.srcObject=null;if(landmarker){landmarker.close();landmarker=null;}clearVoice();voiceToken++;ctx.clearRect(0,0,canvas.width,canvas.height);statusText.textContent="分析已停止";$("poseStatus").textContent="停止";$("manualStart").disabled=true;$("manualEnd").disabled=true;$("start").disabled=false;clearMetrics();resetTracking();$("phase").textContent="等待啟動";}
+$("start").addEventListener("click",start);$("stop").addEventListener("click",stop);
+$("manualStart").addEventListener("click",()=>{
+ if(!running){feedbackText.textContent="請先開啟攝影機與分析。";return;}
+ if(state==="MOVING"){feedbackText.textContent="目前正在記錄動作，請按手動結束並評量。";return;}
+ // 手動開始不依賴當下是否成功取得完整關節資料；避免看得到骨架卻無法開始。
+ positionRecovered();manual=true;actionStart=latest?.wristRel?{...latest.wristRel}:null;
+ peakMovement=0;samples=[];
+ if(latest&&performance.now()-latest.now<800)addSample(latest);
+ setState("MOVING",performance.now());
+ feedbackText.textContent="已開始手動記錄！請完成接球動作，再按『手動結束並評量』。";
+ statusText.textContent="手動記錄中｜有效影格："+samples.length;
+});
+$("manualEnd").addEventListener("click",()=>{
+ if(!running){feedbackText.textContent="請先開啟攝影機與分析。";return;}
+ if(state!=="MOVING"){feedbackText.textContent="請先按『手動開始一次動作』。";return;}
+ finish(performance.now());
+ statusText.textContent="手動評量完成｜有效影格："+samples.length;
+});
+$("testVoice").addEventListener("click",()=>say("您好，歡迎使用AI排球低手小助教"));
+window.addEventListener("beforeunload",stop);
+</script>
+</body>
+</html>
