@@ -12,12 +12,12 @@
 <body>
 <main>
 <h1>🏐 AI Volleyball Coach</h1>
-<p>低手接球動態動作分析｜教學演示模式 v5（手動評量）（無球模擬）</p>
+<p>AI 排球低手小助教｜智慧動作分析與即時回饋</p>
 <div class="buttons">
 <button class="start" id="start">開啟攝影機與分析</button>
 <button class="stop" id="stop">停止分析</button>
-<button class="secondary" id="manualStart" disabled>手動開始一次動作</button>
-<button class="secondary" id="manualEnd" disabled>手動結束並評量</button>
+<button class="secondary" id="manualStart" disabled>開始動作記錄</button>
+<button class="secondary" id="manualEnd" disabled>結束並評量</button>
 <button id="testVoice">測試語音</button>
 </div>
 <p id="status">系統尚未啟動</p>
@@ -25,7 +25,7 @@
 <video id="video" autoplay playsinline muted></video>
 <canvas id="canvas"></canvas>
 <div class="demo-zone"></div>
-<div class="zone-label">中央動作者分析區</div>
+<div class="zone-label">中央動作辨識區</div>
 </div>
 <div class="panel">
 <h3>動作數據</h3>
@@ -179,7 +179,7 @@ function updateAction(f,now){
   if(state==="FEEDBACK"&&now-stateAt>C.feedbackHoldMs){setState("READY",now);}
 }
 function abortAction(){samples=[];manual=false;baseline=null;actionStart=null;peakMovement=0;setState("READY",performance.now());feedbackText.textContent="動作資料中斷，請重新示範";}
-async function start(){if(running||starting)return;starting=true;$("start").disabled=true;try{statusText.textContent="正在載入人體辨識模型...";if(!landmarker){const vision=await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm");landmarker=await PoseLandmarker.createFromOptions(vision,{baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task"},runningMode:"VIDEO",numPoses:2});}statusText.textContent="正在開啟攝影機...";stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"},width:{ideal:1280},height:{ideal:720}},audio:false});video.srcObject=stream;await video.play();running=true;lastVideoTime=-1;resetTracking();$("manualStart").disabled=false;clearVoice();cameraStartedAt=performance.now();everReady=false;positionRecovered();lastPositionVoiceAt=-Infinity;lastManualEndAt=-Infinity;statusText.textContent="分析運作中（手動動作評量＋自動站位提醒 v5.2）";feedbackText.textContent=WAIT_TEXT;rafId=requestAnimationFrame(loop);say("您好，歡迎使用AI排球低手小助教。請站在畫面中央的綠色辨識區，讓全身完整入鏡。準備好後，請按手動開始，完成一次低手接球動作，再按手動結束並評量。動作時請注意雙手靠攏、手肘自然伸直，膝蓋微彎、保持穩定。現在可以開始練習了。");}catch(error){statusText.textContent="啟動失敗："+error.message;console.error(error);if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;}video.srcObject=null;}finally{starting=false;$("start").disabled=running;}}
+async function start(){if(running||starting)return;starting=true;$("start").disabled=true;try{statusText.textContent="正在載入人體辨識模型...";if(!landmarker){const vision=await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm");landmarker=await PoseLandmarker.createFromOptions(vision,{baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task"},runningMode:"VIDEO",numPoses:2});}statusText.textContent="正在開啟攝影機...";stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"},width:{ideal:1280},height:{ideal:720}},audio:false});video.srcObject=stream;await video.play();running=true;lastVideoTime=-1;resetTracking();$("manualStart").disabled=false;clearVoice();cameraStartedAt=performance.now();everReady=false;positionRecovered();lastPositionVoiceAt=-Infinity;lastManualEndAt=-Infinity;statusText.textContent="分析運作中（手動動作評量＋自動站位提醒 v5.2）";feedbackText.textContent=WAIT_TEXT;rafId=requestAnimationFrame(loop);say("您好，歡迎使用AI排球低手小助教。請站在畫面中央的綠色辨識區，讓全身完整入鏡。準備好後，請按手動開始，完成一次低手接球動作，再按結束並評量。動作時請注意雙手靠攏、手肘自然伸直，膝蓋微彎、保持穩定。現在可以開始練習了。");}catch(error){statusText.textContent="啟動失敗："+error.message;console.error(error);if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;}video.srcObject=null;}finally{starting=false;$("start").disabled=running;}}
 function loop(){
  if(!running)return;
  try{
@@ -213,18 +213,18 @@ function stop(){running=false;if(rafId!==null){cancelAnimationFrame(rafId);rafId
 $("start").addEventListener("click",start);$("stop").addEventListener("click",stop);
 $("manualStart").addEventListener("click",()=>{
  if(!running){feedbackText.textContent="請先開啟攝影機與分析。";return;}
- if(state==="MOVING"){feedbackText.textContent="目前正在記錄動作，請按手動結束並評量。";return;}
+ if(state==="MOVING"){feedbackText.textContent="目前正在記錄動作，請按結束並評量。";return;}
  // 手動開始不依賴當下是否成功取得完整關節資料；避免看得到骨架卻無法開始。
  positionRecovered();manual=true;actionStart=latest?.wristRel?{...latest.wristRel}:null;
  peakMovement=0;samples=[];
  if(latest&&performance.now()-latest.now<800)addSample(latest);
  setState("MOVING",performance.now());
- feedbackText.textContent="已開始手動記錄！請完成接球動作，再按『手動結束並評量』。";
+ feedbackText.textContent="已開始手動記錄！請完成接球動作，再按『結束並評量』。";
  statusText.textContent="手動記錄中｜有效影格："+samples.length;
 });
 $("manualEnd").addEventListener("click",()=>{
  if(!running){feedbackText.textContent="請先開啟攝影機與分析。";return;}
- if(state!=="MOVING"){feedbackText.textContent="請先按『手動開始一次動作』。";return;}
+ if(state!=="MOVING"){feedbackText.textContent="請先按『開始動作記錄』。";return;}
  finish(performance.now());
  statusText.textContent="手動評量完成｜有效影格："+samples.length;
 });
